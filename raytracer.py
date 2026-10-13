@@ -107,120 +107,124 @@ def _kerr_Theta(theta, M, a, xi, eta):
     return eta - cos2 * (xi**2 / sin2 - a**2)
 
 
-def _kerr_rhs(lam, state, M, a, xi, eta, sign_r, sign_th):
-    r, theta, phi, t = state
+def _kerr_dR(r, M, a, xi, eta):
+    # dR/dr, used for the second-order radial equation
+    P = r**2 + a**2 - a * xi
+    return 4.0 * r * P - (2.0 * r - 2.0 * M) * (eta + (xi - a)**2)
+
+
+def _kerr_dTheta(theta, M, a, xi, eta):
+    # dTheta/dtheta, used for the second-order polar equation
+    s = np.sin(theta)
+    if abs(s) < 1e-6:
+        s = 1e-6 if s >= 0 else -1e-6
+    c = np.cos(theta)
+    return -2.0 * a**2 * c * s + 2.0 * xi**2 * c / s**3
+
+
+def _kerr_rhs(tau, state, M, a, xi, eta):
+    """
+    Kerr null geodesic equations in Mino time tau, where d(tau) = d(lambda) / Sigma.
+
+    First-order (Carter) form:   (dr/dtau)^2 = R(r),   (dtheta/dtau)^2 = Theta(theta)
+    Differentiating once gives:   d2r/dtau2 = R'(r)/2,  d2theta/dtau2 = Theta'(theta)/2
+
+    We integrate the second-order form. At a turning point (closest approach,
+    or a maximum/minimum in theta) R or Theta hits zero but its derivative
+    does not, so the photon turns around on its own. The first-order form
+    r' = +/- sqrt(R) can't do this without tracking the sign by hand.
+
+    state = [r, theta, phi, t, lambda, dr/dtau, dtheta/dtau]
+    """
+    r, theta, phi, t, lam, pr, pth = state
 
     Sigma = r**2 + (a * np.cos(theta))**2
     Delta = r**2 - 2.0 * M * r + a**2
+    Delta = Delta if abs(Delta) > 1e-12 else 1e-12
     P     = r**2 + a**2 - a * xi
+    sin2  = max(np.sin(theta)**2, 1e-12)
 
-    R_val  = _kerr_R(r, M, a, xi, eta)
-    Th_val = _kerr_Theta(theta, M, a, xi, eta)
+    dphi = -(a - xi / sin2) + a * P / Delta
+    dt   = -a * (a * sin2 - xi) + (r**2 + a**2) * P / Delta
 
-    # Clamp to zero (numerical noise can make them slightly negative)
-    dr_dlam    = sign_r  * np.sqrt(max(R_val,  0.0)) / max(Sigma, 1e-8)
-    dth_dlam   = sign_th * np.sqrt(max(Th_val, 0.0)) / max(Sigma, 1e-8)
-
-    sin2 = max(np.sin(theta)**2, 1e-10)
-    dDelta = max(Delta, 1e-10)
-
-    dphi_dlam  = (-(a - xi / sin2) + a * P / dDelta) / max(Sigma, 1e-8)
-    dt_dlam    = (-a * (a * sin2 - xi) + (r**2 + a**2) * P / dDelta) / max(Sigma, 1e-8)
-
-    return [dr_dlam, dth_dlam, dphi_dlam, dt_dlam]
+    return [pr,
+            pth,
+            dphi,
+            dt,
+            Sigma,                                   # d(lambda)/d(tau)
+            0.5 * _kerr_dR(r, M, a, xi, eta),
+            0.5 * _kerr_dTheta(theta, M, a, xi, eta)]
 
 
 def trace_kerr(M, a, xi, eta, r_start, theta_obs=np.pi/2,
-               n_steps=4000, lam_max=200.0):
+               n_steps=4000, lam_max=200.0, theta_dir=-1):
+    """
+    Trace a photon with impact parameters (xi, eta) inward from r_start.
+
+    xi  = L_z / E   (sign sets prograde > 0 / retrograde < 0 for a > 0)
+    eta = Carter constant / E^2   (eta = 0 keeps an equatorial photon equatorial)
+
+    Integration stops when the photon crosses the outer horizon (captured),
+    escapes back out past 2 * r_start, or has travelled lam_max in affine
+    parameter (same meaning as before the Mino-time rewrite).
+    """
     r_outer, _ = kerr_horizons_local(M, a)
 
-    # Initial theta velocity from Carter constant
+    R0  = _kerr_R(r_start, M, a, xi, eta)
     Th0 = _kerr_Theta(theta_obs, M, a, xi, eta)
-    dth0 = -np.sqrt(max(Th0, 0.0)) / (r_start**2 + (a * np.cos(theta_obs))**2)
+    if R0 < 0:
+        raise ValueError(f"Photon with xi={xi}, eta={eta} cannot exist at r={r_start} (R(r) < 0).")
 
-    # Initial r velocity (falling inward)
-    R0   = _kerr_R(r_start, M, a, xi, eta)
-    dr0  = -np.sqrt(max(R0, 0.0)) / (r_start**2 + (a * np.cos(theta_obs))**2)
+    pr0  = -np.sqrt(R0)                                 # moving inward
+    pth0 = (theta_dir if theta_dir != 0 else -1) * np.sqrt(max(Th0, 0.0))
 
-    # Signs track direction (+1 increasing, -1 decreasing)
-    sign_r  = [-1]   # mutable list for closure
-    sign_th = [np.sign(dth0) if dth0 != 0 else -1]
+    state0 = [r_start, theta_obs, 0.0, 0.0, 0.0, pr0, pth0]
 
-    def rhs_adaptive(lam, state):
-        return _kerr_rhs(lam, state, M, a, xi, eta, sign_r[0], sign_th[0])
+    def horizon_event(tau, s, *args):
+        return s[0] - r_outer * 1.01
+    horizon_event.terminal, horizon_event.direction = True, -1
 
-    def horizon_event(lam, state):
-        return state[0] - r_outer * 1.005
+    def escape_event(tau, s, *args):
+        return s[0] - 2.0 * r_start
+    escape_event.terminal, escape_event.direction = True, 1
 
-    horizon_event.terminal  = True
-    horizon_event.direction = -1
+    def affine_limit_event(tau, s, *args):
+        return s[4] - lam_max
+    affine_limit_event.terminal, affine_limit_event.direction = True, 1
 
-    state0 = [r_start, theta_obs, 0.0, 0.0]
+    # Mino time is bounded by the affine-limit event; this is just a safety cap.
+    tau_cap = 50.0 * lam_max / max(r_outer, 1e-3)**2
 
-    # Integrate in short segments to flip signs at turning points
-    r_path   = [r_start]
-    th_path  = [theta_obs]
-    phi_path = [0.0]
-    t_path   = [0.0]
-    captured = False
+    sol = solve_ivp(
+        fun          = _kerr_rhs,
+        t_span       = (0.0, tau_cap),
+        y0           = state0,
+        args         = (M, a, xi, eta),
+        method       = "DOP853",
+        rtol         = 1e-10, atol = 1e-10,
+        events       = [horizon_event, escape_event, affine_limit_event],
+        dense_output = True,
+    )
 
-    lam     = 0.0
-    state   = state0[:]
-    dlam    = lam_max / n_steps
-    prev_dr = dr0
-    prev_dth = dth0
+    tau = np.linspace(0.0, sol.t[-1], n_steps)
+    y   = sol.sol(tau)
+    r_arr, th_arr, phi_arr, t_arr, lam_arr = y[0], y[1], y[2], y[3], y[4]
 
-    for _ in range(n_steps):
-        if lam >= lam_max:
-            break
+    captured = len(sol.t_events[0]) > 0
 
-        dr_dlam  = sign_r[0]  * np.sqrt(max(_kerr_R(_clamp_r(state[0], r_outer), M, a, xi, eta), 0.0)) \
-                   / max(state[0]**2 + (a*np.cos(state[1]))**2, 1e-8)
-        dth_dlam = sign_th[0] * np.sqrt(max(_kerr_Theta(state[1], M, a, xi, eta), 0.0)) \
-                   / max(state[0]**2 + (a*np.cos(state[1]))**2, 1e-8)
-
-        # Detect sign flips at turning points
-        if prev_dr * dr_dlam < 0:
-            sign_r[0] *= -1
-        if prev_dth * dth_dlam < 0:
-            sign_th[0] *= -1
-
-        prev_dr  = dr_dlam
-        prev_dth = dth_dlam
-
-        # Euler step (fast; RK4 below for accuracy)
-        new_state = _rk4_step(rhs_adaptive, lam, state, dlam)
-
-        lam   += dlam
-        state  = new_state
-
-        r_path.append(state[0])
-        th_path.append(state[1])
-        phi_path.append(state[2])
-        t_path.append(state[3])
-
-        if state[0] <= r_outer * 1.01:
-            captured = True
-            break
-        if state[0] >= r_start * 2.0:
-            break   # escaped far enough
-
-    r_arr   = np.array(r_path)
-    th_arr  = np.array(th_path)
-    phi_arr = np.array(phi_path)
-
-    # Convert to Cartesian (equatorial projection)
+    # Convert to Cartesian (Boyer-Lindquist treated as spherical for plotting)
     x = r_arr * np.sin(th_arr) * np.cos(phi_arr)
-    y = r_arr * np.sin(th_arr) * np.sin(phi_arr)
+    y_ = r_arr * np.sin(th_arr) * np.sin(phi_arr)
     z = r_arr * np.cos(th_arr)
 
     dphi = abs(phi_arr[-1] - phi_arr[0])
     n_winds = dphi / (2.0 * np.pi)
 
     return {
-        "r": r_arr, "theta": th_arr, "phi": phi_arr,
-        "x": x, "y": y, "z": z,
+        "r": r_arr, "theta": th_arr, "phi": phi_arr, "t": t_arr, "lam": lam_arr,
+        "x": x, "y": y_, "z": z,
         "captured": captured,
+        "escaped": len(sol.t_events[1]) > 0,
         "n_windings": n_winds,
         "xi": xi, "eta": eta, "a": a, "M": M,
     }
@@ -297,21 +301,6 @@ def kerr_horizons_local(M, a):
     ## Wrapper so raytracer doesn't import metric directly in every function.
     disc = max(M**2 - a**2, 0.0)
     return M + np.sqrt(disc), M - np.sqrt(disc)
-
-
-def _clamp_r(r, r_outer):
-    return max(r, r_outer * 1.002)
-
-
-def _rk4_step(f, t, y, h):
-
-    ## Classic 4th-order Runge-Kutta single step.
-    y  = np.asarray(y, dtype=float)
-    k1 = np.asarray(f(t,       y))
-    k2 = np.asarray(f(t + h/2, y + h/2 * k1))
-    k3 = np.asarray(f(t + h/2, y + h/2 * k2))
-    k4 = np.asarray(f(t + h,   y + h   * k3))
-    return list(y + h/6 * (k1 + 2*k2 + 2*k3 + k4))
 
 
 def _point_in_curve(px, py, cx, cy):
