@@ -255,7 +255,7 @@ def fig_kerr_shadow(M=1.0, a=0.9, save=None):
     ax.set_xlim(-7.5, 7.5); ax.set_ylim(-7.5, 7.5)
     ax.set_aspect("equal")
 
-    ax.annotate("Prograde\n(inward shift)", xy=(-3.5, 0), color=PHOTON,
+    ax.annotate("Prograde\n(inward shift)", xy=(-5.0, 0), color=PHOTON,
                 fontsize=8, ha="center", va="center",
                 bbox=dict(boxstyle="round,pad=0.3", fc="#0a0020", ec=PHOTON, lw=0.8))
     ax.annotate("Retrograde\n(outward shift)", xy=(4.5, 0), color="#29b6f6",

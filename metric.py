@@ -162,7 +162,7 @@ def kerr_shadow_params(M, a, theta_obs=np.pi/2):
     The shadow is defined by photons on unstable spherical orbits.
     In Boyer-Lindquist coords these photons have impact parameters (ξ, η):
 
-      ξ = (r_ph² * (3M - r_ph) + a²(r_ph + M)) / (a(r_ph - M))
+      ξ = (r_ph² * (3M - r_ph) - a²(r_ph + M)) / (a(r_ph - M))   [Bardeen 1973]
       η = r_ph³ * (4Ma² - r_ph(r_ph - 3M)²) / (a²(r_ph - M)²)
 
     These are the celestial coordinates on the observer's sky.
@@ -179,7 +179,7 @@ def kerr_shadow_params(M, a, theta_obs=np.pi/2):
 
     for r_ph in r_ph_arr:
         D   = kerr_Delta(r_ph, M, a)
-        num_xi  = (r_ph**2 * (3*M - r_ph) + a**2 * (r_ph + M))
+        num_xi  = (r_ph**2 * (3*M - r_ph) - a**2 * (r_ph + M))
         den_xi  = a * (r_ph - M) + 1e-10
         xi  = num_xi / den_xi
 
